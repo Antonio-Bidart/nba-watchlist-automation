@@ -27,8 +27,8 @@ def get_processed_game_ids():
     """Devuelve un set de tuplas (jugador, game_id) que ya están en el Historial."""
     sh = _open_sheet()
     ws = sh.worksheet(config.HISTORIAL_TAB)
-    rows = ws.get_all_records()
-    return {(r["Jugador"], str(r["Game_ID"])) for r in rows}
+    rows = ws.get_all_records(numericise_ignore=["all"])
+    return {(str(r["Jugador"]).strip(), str(r["Game_ID"]).strip()) for r in rows}
 
 
 def append_historial(row: dict):
