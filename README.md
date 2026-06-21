@@ -1,85 +1,84 @@
 # NBA Watchlist Automation
 
-Pipeline que lee una watchlist de jugadores NBA (cargada vía Google Form), revisa
-sus últimos partidos contra la API de la NBA, y notifica por mail cuando alguno
-cumple un umbral (puntos, doble-doble, triple-doble). Corre solo, todos los días,
-vía GitHub Actions — sin servidor propio.
+Te avisa por mail cuando alguno de los jugadores que seguís tiene un partidazo.
+Corre solo, todos los días, sin servidor propio.
 
-## Arquitectura (5 pasos)
 
-| Paso | Implementación |
+## Qué hace
+
+- Cargás jugadores a seguir desde un Google Form (con un umbral de puntos
+  opcional para cada uno)
+- Todos los días, un workflow revisa los últimos partidos de cada jugador
+  contra la API pública de stats.nba.com
+- Si alguno tuvo un buen partido (superó el umbral, o hizo doble-doble /
+  triple-doble), te llega un mail
+- Todo queda registrado en un Sheet de historial, para no repetir avisos del
+  mismo partido dos veces
+
+## Arquitectura
+
+| Parte | Implementación |
 |---|---|
-| **Trigger** | GitHub Actions, cron diario (+ `workflow_dispatch` para correrlo a mano) |
-| **Input** | Google Sheet "watchlist" (alimentado por un Google Form) + NBA API (`nba_api`) |
-| **Procesamiento** | `rules.py` — evalúa si el partido cumple el umbral o es doble/triple-doble |
-| **Output** | Fila nueva en el Sheet "Historial" + mail si corresponde |
-| **Observabilidad** | Logging en cada corrida, columna de estado para idempotencia, mail de error si algo de la cadena falla |
-
-## Equivalencia con N8N / Make
-
-Esto resuelve el mismo problema que armarías con un workflow de bajo código,
-solo que en Python:
-
-| Concepto en N8N/Make | Acá |
-|---|---|
-| Schedule Trigger | Cron de GitHub Actions |
-| Form/Webhook Trigger | Google Form → Sheet vinculado |
-| HTTP Request node | `nba_client.py` |
-| Google Sheets node (read/write) | `sheets_client.py` (gspread) |
-| IF / Filter node | `rules.py` |
-| Send Email node | `notifier.py` |
-| Error Trigger | try/except en `main.py` + mail de error |
+| Disparador | GitHub Actions, cron diario (+ ejecución manual) |
+| Entrada de datos | Google Sheet "watchlist" (alimentado por un Form) + API de la NBA |
+| Lógica | `rules.py` — evalúa umbral, doble-doble, triple-doble |
+| Salida | Fila nueva en el Sheet "Historial" + mail si corresponde |
+| Manejo de errores | Logging por corrida, reintentos en la consulta a la API, mail aparte si algo de la cadena falla |
 
 ## Estructura
-
-```
 src/
+
 ├── config.py          # variables de entorno y defaults
+
 ├── sheets_client.py    # leer watchlist, leer/escribir historial
-├── nba_client.py        # resolver jugador, traer sus últimos partidos
-├── rules.py              # qué cuenta como "buen partido"
-├── notifier.py            # envío de mail (SMTP)
+
+├── nba_client.py         # resolver jugador, traer sus últimos partidos
+
+├── rules.py               # qué cuenta como "buen partido"
+
+├── notifier.py             # envío de mail (SMTP)
+
 └── main.py                  # orquesta todo
-```
 
-## Setup
+run.py                          # entrypoint simple para correrlo local
 
-### 1. Infraestructura (ya hecha si seguiste la guía)
-- Google Form + Sheet vinculado (pestaña "Respuestas de formulario 1")
-- Pestaña "Historial" en el mismo Sheet con headers:
-  `Jugador | Fecha_partido | Game_ID | Puntos | Rebotes | Asistencias | Cumple_umbral | Fecha_procesado`
-- Service account de Google Cloud con Sheets API habilitada, compartida como Editor en el Sheet
-- App Password de Gmail para mandar los mails
+## Algunas decisiones técnicas
 
-### 2. GitHub Secrets
+- **Idempotencia:** antes de notificar, el script chequea si ese partido
+  específico ya está en el Historial (por jugador + ID de partido). Sin esto,
+  cada corrida volvería a mandar el mismo aviso.
+- **Reintentos:** la API de stats.nba.com a veces no responde bien desde
+  runners en la nube (lo noté corriendo esto en GitHub Actions — local andaba
+  perfecto, en Actions tiraba timeout). Le sumé reintentos con backoff y subí
+  el timeout default.
+- **Separación en módulos chicos:** cada archivo habla con un solo sistema
+  externo (Sheets, NBA API, mail), así si algo falla es fácil saber dónde
+  mirar.
 
-En el repo: Settings → Secrets and variables → Actions → New repository secret
+## Correrlo vos mismo
 
-| Secret | Valor |
-|---|---|
-| `SHEET_ID` | El ID del Sheet (parte de la URL entre `/d/` y `/edit`) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | El contenido completo del JSON de la service account, pegado tal cual |
-| `GMAIL_ADDRESS` | El mail que manda las notificaciones |
-| `GMAIL_APP_PASSWORD` | El app password de 16 caracteres |
-| `NOTIFY_TO` | El mail que recibe las notificaciones (puede ser el mismo que `GMAIL_ADDRESS`) |
+1. Creá un Google Form con los campos "Nombre del jugador" y "Umbral de
+   puntos", vinculalo a un Sheet
+2. Agregá una pestaña "Historial" con columnas:
+   `Jugador | Fecha_partido | Game_ID | Puntos | Rebotes | Asistencias | Cumple_umbral | Fecha_procesado`
+3. Creá un proyecto en Google Cloud, habilitá la Sheets API, generá una
+   cuenta de servicio y compartile el Sheet como Editor
+4. Generá un App Password de Gmail para mandar los mails
+5. Cargá los secrets en el repo (Settings → Secrets and variables → Actions):
+   `SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GMAIL_ADDRESS`,
+   `GMAIL_APP_PASSWORD`, `NOTIFY_TO`
 
-### 3. Probar local
+Para probar local:
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # completar con tus datos
-python -m src.main
+python run.py
 ```
 
-### 4. Correr en GitHub Actions
+## Posibles mejoras
 
-Una vez pusheado con los secrets cargados, andá a la pestaña **Actions** del repo
-y corré el workflow manualmente (`workflow_dispatch`) para la primera prueba,
-sin esperar al cron.
-
-## Nota sobre la temporada
-
-`NBA_SEASON` y `NBA_SEASON_TYPE` en `.env` controlan qué temporada/tipo de
-partido trae `nba_api`. Como la temporada 2025-26 recién terminó, por default
-apunta ahí en modo Regular Season — para testear con los partidos de Playoffs/Finals,
-cambiar `NBA_SEASON_TYPE=Playoffs`.
+- Soportar Regular Season y Playoffs en la misma corrida, sin tener que
+  cambiar el config a mano
+- Notificación por Telegram además de mail
+- Un dashboard simple para ver el historial sin entrar al Sheet
